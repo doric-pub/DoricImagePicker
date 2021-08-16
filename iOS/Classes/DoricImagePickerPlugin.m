@@ -1,9 +1,24 @@
 #import "DoricImagePickerPlugin.h"
-#import <AVFoundation/AVFoundation.h>
 #import <MobileCoreServices/MobileCoreServices.h>
 #import <Photos/Photos.h>
-#import <PhotosUI/PHPhotoLibrary+PhotosUISupport.h>
 #import <PhotosUI/PhotosUI.h>
+
+@interface DoricPickerSaveImageToPathOperation : NSOperation
+@property(strong, nonatomic) PHPickerResult *result;
+@property(assign, nonatomic) NSNumber *maxHeight;
+@property(assign, nonatomic) NSNumber *maxWidth;
+@property(assign, nonatomic) NSNumber *desiredImageQuality;
+
+- (instancetype)initWithResult:(PHPickerResult *)result
+                     maxHeight:(NSNumber *)maxHeight
+                      maxWidth:(NSNumber *)maxWidth
+           desiredImageQuality:(NSNumber *)desiredImageQuality
+                savedPathBlock:(void (^)(NSString *))savedPathBlock API_AVAILABLE(ios(14));
+
+@end
+
+typedef void (^GetSavedPath)(NSString *);
+
 
 @interface GIFInfo : NSObject
 @property(strong, nonatomic) NSArray<UIImage *> *images;
@@ -29,9 +44,20 @@
 
 @interface DoricImagePickerPlugin () <
         UIImagePickerControllerDelegate,
-        UINavigationControllerDelegate>
+        UINavigationControllerDelegate,
+        PHPickerViewControllerDelegate>
 @property(nonatomic, strong) NSDictionary *params;
 @property(nonatomic, strong) DoricPromise *promise;
+@property(strong, nonatomic) PHPickerViewController *pickerViewController API_AVAILABLE(ios(14));
+@property(strong, nonatomic) UIImagePickerController *imagePickerController;
+@property(assign, nonatomic) int maxImagesAllowed;
+
++ (UIImage *)scaledImage:(UIImage *)image maxWidth:(NSNumber *)maxWidth maxHeight:(NSNumber *)maxHeight isMetadataAvailable:(BOOL)isMetadataAvailable;
+
++ (NSString *)saveImageWithMetaData:(NSDictionary *)metaData image:(UIImage *)image suffix:(NSString *)suffix type:(enum DoricImagePickerMIMEType)type imageQuality:(NSNumber *)imageQuality;
+
++ (NSString *)saveImageWithOriginalImageData:(NSData *)originalImageData image:(UIImage *)image maxWidth:(NSNumber *)maxWidth maxHeight:(NSNumber *)maxHeight imageQuality:(NSNumber *)imageQuality;
+
 @end
 
 typedef NS_ENUM(NSInteger, DoricImagePickerClassType) {
@@ -50,11 +76,137 @@ static const uint8_t kFirstBytePNG = 0x89;
 static const uint8_t kFirstByteGIF = 0x47;
 
 
+@implementation DoricPickerSaveImageToPathOperation {
+    BOOL executing;
+    BOOL finished;
+    GetSavedPath getSavedPath;
+}
+
+
+- (instancetype)initWithResult:(PHPickerResult *)result
+                     maxHeight:(NSNumber *)maxHeight
+                      maxWidth:(NSNumber *)maxWidth
+           desiredImageQuality:(NSNumber *)desiredImageQuality
+                savedPathBlock:(GetSavedPath)savedPathBlock API_AVAILABLE(ios(14)) {
+    if (self = [super init]) {
+        if (result) {
+            self.result = result;
+            self.maxHeight = maxHeight;
+            self.maxWidth = maxWidth;
+            self.desiredImageQuality = desiredImageQuality;
+            getSavedPath = savedPathBlock;
+            executing = NO;
+            finished = NO;
+        } else {
+            return nil;
+        }
+        return self;
+    } else {
+        return nil;
+    }
+}
+
+- (BOOL)isConcurrent {
+    return YES;
+}
+
+- (BOOL)isExecuting {
+    return executing;
+}
+
+- (BOOL)isFinished {
+    return finished;
+}
+
+- (void)setFinished:(BOOL)isFinished {
+    [self willChangeValueForKey:@"isFinished"];
+    self->finished = isFinished;
+    [self didChangeValueForKey:@"isFinished"];
+}
+
+- (void)setExecuting:(BOOL)isExecuting {
+    [self willChangeValueForKey:@"isExecuting"];
+    self->executing = isExecuting;
+    [self didChangeValueForKey:@"isExecuting"];
+}
+
+- (void)completeOperationWithPath:(NSString *)savedPath {
+    [self setExecuting:NO];
+    [self setFinished:YES];
+    getSavedPath(savedPath);
+}
+
+- (PHAsset *)getAssetFromPHPickerResult:(PHPickerResult *)result API_AVAILABLE(ios(14)) {
+    PHFetchResult *fetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[result.assetIdentifier]
+                                                                  options:nil];
+    return fetchResult.firstObject;
+}
+
+- (void)start {
+    if ([self isCancelled]) {
+        [self setFinished:YES];
+        return;
+    }
+    if (@available(iOS 14, *)) {
+        [self setExecuting:YES];
+        [self.result.itemProvider
+                loadObjectOfClass:[UIImage class]
+                completionHandler:^(__kindof id <NSItemProviderReading> _Nullable image,
+                        NSError *_Nullable error) {
+                    if ([image isKindOfClass:[UIImage class]]) {
+                        __block UIImage *localImage = image;
+                        PHAsset *originalAsset =
+                                [self getAssetFromPHPickerResult:self.result];
+
+                        if (self.maxWidth != (id) [NSNull null] || self.maxHeight != (id) [NSNull null]) {
+                            localImage = [DoricImagePickerPlugin scaledImage:localImage
+                                                                    maxWidth:self.maxWidth
+                                                                   maxHeight:self.maxHeight
+                                                         isMetadataAvailable:originalAsset != nil];
+                        }
+                        __block NSString *savedPath;
+                        if (!originalAsset) {
+                            // Image picked without an original asset (e.g. User pick image without permission)
+
+                            savedPath = [DoricImagePickerPlugin saveImageWithMetaData:nil
+                                                                                image:localImage
+                                                                               suffix:@".jpg"
+                                                                                 type:DoricImagePickerMIMETypeJPG
+                                                                         imageQuality:self.desiredImageQuality];
+                            [self completeOperationWithPath:savedPath];
+                        } else {
+                            [[PHImageManager defaultManager]
+                                    requestImageDataForAsset:originalAsset
+                                                     options:nil
+                                               resultHandler:^(
+                                                       NSData *_Nullable imageData, NSString *_Nullable dataUTI,
+                                                       UIImageOrientation orientation, NSDictionary *_Nullable info) {
+                                                   // maxWidth and maxHeight are used only for GIF images.
+                                                   savedPath = [DoricImagePickerPlugin
+                                                           saveImageWithOriginalImageData:imageData
+                                                                                    image:localImage
+                                                                                 maxWidth:self.maxWidth
+                                                                                maxHeight:self.maxHeight
+                                                                             imageQuality:self.desiredImageQuality];
+                                                   [self completeOperationWithPath:savedPath];
+                                               }];
+                        }
+                    }
+                }];
+    } else {
+        [self setFinished:YES];
+    }
+}
+
+@end
+
 @implementation DoricImagePickerPlugin
 - (void)pickImage:(NSDictionary *)dic withPromise:(DoricPromise *)promise {
+    self.params = dic;
+    self.promise = promise;
     BOOL useCamera = [dic[@"source"] integerValue] == 1;
     if (useCamera) {
-
+        [self pickImageWithUIImagePicker];
     } else {
         if (@available(iOS 14, *)) {
             // PHPicker is used
@@ -66,94 +218,37 @@ static const uint8_t kFirstByteGIF = 0x47;
     }
 }
 
-- (DoricImagePickerMIMEType)getImageMIMETypeFromImageData:(NSData *)imageData {
-    uint8_t firstByte;
-    [imageData getBytes:&firstByte length:1];
-    switch (firstByte) {
-        case kFirstByteJPEG:
-            return DoricImagePickerMIMETypeJPG;
-        case kFirstBytePNG:
-            return DoricImagePickerMIMETypePNG;
-        case kFirstByteGIF:
-            return DoricImagePickerMIMETypeGIF;
-    }
-    return DoricImagePickerMIMETypeOther;
-}
-
-- (NSString *)imageTypeSuffixFromType:(DoricImagePickerMIMEType)type {
-    switch (type) {
-        case DoricImagePickerMIMETypeJPG:
-            return @".jpg";
-        case DoricImagePickerMIMETypePNG:
-            return @".png";
-        case DoricImagePickerMIMETypeGIF:
-            return @".gif";
-        default:
-            return nil;
+- (void)pickMultiImage:(NSDictionary *)dic withPromise:(DoricPromise *)promise {
+    self.params = dic;
+    self.promise = promise;
+    if (@available(iOS 14, *)) {
+        [self pickImageWithPHPicker:0];
+    } else {
+        [self pickImageWithUIImagePicker];
     }
 }
 
-
-- (NSDictionary *)getMetaDataFromImageData:(NSData *)imageData {
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef) imageData, NULL);
-    NSDictionary *metadata =
-            (NSDictionary *) CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
-    CFRelease(source);
-    return metadata;
-}
-
-
-- (NSData *)imageFromImage:(NSData *)imageData withMetaData:(NSDictionary *)metadata {
-    NSMutableData *targetData = [NSMutableData data];
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef) imageData, NULL);
-    if (source == NULL) {
-        return nil;
+- (void)pickVideo:(NSDictionary *)dic withPromise:(DoricPromise *)promise {
+    self.params = dic;
+    self.promise = promise;
+    _imagePickerController = [[UIImagePickerController alloc] init];
+    _imagePickerController.modalPresentationStyle = UIModalPresentationCurrentContext;
+    _imagePickerController.delegate = self;
+    _imagePickerController.mediaTypes = @[
+            (NSString *) kUTTypeMovie, (NSString *) kUTTypeAVIMovie, (NSString *) kUTTypeVideo,
+            (NSString *) kUTTypeMPEG4
+    ];
+    _imagePickerController.videoQuality = UIImagePickerControllerQualityTypeHigh;
+    if ([dic[@"maxDuration"] isKindOfClass:[NSNumber class]]) {
+        NSTimeInterval max = [dic[@"maxDuration"] doubleValue];
+        _imagePickerController.videoMaximumDuration = max;
     }
-    CGImageDestinationRef destination = NULL;
-    CFStringRef sourceType = CGImageSourceGetType(source);
-    if (sourceType != NULL) {
-        destination =
-                CGImageDestinationCreateWithData((__bridge CFMutableDataRef) targetData, sourceType, 1, nil);
+    BOOL useCamera = [dic[@"source"] integerValue] == 1;
+    if (useCamera) {
+        [self checkCameraAuthorization];
+    } else {
+        [self checkPhotoAuthorization];
     }
-    if (destination == NULL) {
-        CFRelease(source);
-        return nil;
-    }
-    CGImageDestinationAddImageFromSource(destination, source, 0, (__bridge CFDictionaryRef) metadata);
-    CGImageDestinationFinalize(destination);
-    CFRelease(source);
-    CFRelease(destination);
-    return targetData;
-}
-
-
-- (NSData *)convertImage:(UIImage *)image
-               usingType:(DoricImagePickerMIMEType)type
-                 quality:(nullable NSNumber *)quality {
-    if (quality && type != DoricImagePickerMIMETypeJPG) {
-        NSLog(@"image_picker: compressing is not supported for type %@. Returning the image with "
-              @"original quality",
-                [self imageTypeSuffixFromType:type]);
-    }
-
-    switch (type) {
-        case DoricImagePickerMIMETypeJPG: {
-            CGFloat qualityFloat = (quality != nil) ? quality.floatValue : 1;
-            return UIImageJPEGRepresentation(image, qualityFloat);
-        }
-        case DoricImagePickerMIMETypePNG:
-            return UIImagePNGRepresentation(image);
-        default: {
-            // converts to JPEG by default.
-            CGFloat qualityFloat = (quality != nil) ? quality.floatValue : 1;
-            return UIImageJPEGRepresentation(image, qualityFloat);
-        }
-    }
-}
-
-
-- (void)pickImageWithUIImagePicker {
-    [self checkPhotoAuthorization];
 }
 
 - (void)checkPhotoAuthorization {
@@ -182,6 +277,204 @@ static const uint8_t kFirstByteGIF = 0x47;
     }
 }
 
+- (void)pickImageWithPHPicker:(int)maxImagesAllowed API_AVAILABLE(ios(14)) {
+    PHPickerConfiguration *config =
+            [[PHPickerConfiguration alloc] initWithPhotoLibrary:PHPhotoLibrary.sharedPhotoLibrary];
+    config.selectionLimit = maxImagesAllowed;  // Setting to zero allow us to pick unlimited photos
+    config.filter = [PHPickerFilter imagesFilter];
+
+    _pickerViewController = [[PHPickerViewController alloc] initWithConfiguration:config];
+    _pickerViewController.delegate = self;
+
+    self.maxImagesAllowed = maxImagesAllowed;
+
+    [self checkPhotoAuthorizationForAccessLevel];
+}
+
+- (void)checkPhotoAuthorizationForAccessLevel API_AVAILABLE(ios(14)) {
+    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+    switch (status) {
+        case PHAuthorizationStatusNotDetermined: {
+            [PHPhotoLibrary
+                    requestAuthorizationForAccessLevel:PHAccessLevelReadWrite
+                                               handler:^(PHAuthorizationStatus status) {
+                                                   dispatch_async(dispatch_get_main_queue(), ^{
+                                                       if (status == PHAuthorizationStatusAuthorized) {
+                                                           [self showPhotoLibrary:PHPickerClassType];
+                                                       } else if (status == PHAuthorizationStatusLimited) {
+                                                           [self showPhotoLibrary:PHPickerClassType];
+                                                       } else {
+                                                           [self.promise reject:@"Permission_NOT_GRANTED"];
+                                                       }
+                                                   });
+                                               }];
+            break;
+        }
+        case PHAuthorizationStatusAuthorized:
+        case PHAuthorizationStatusLimited:
+            [self showPhotoLibrary:PHPickerClassType];
+            break;
+        case PHAuthorizationStatusDenied:
+        case PHAuthorizationStatusRestricted:
+        default:
+            [self.promise reject:@"Permission_NOT_GRANTED"];
+            break;
+    }
+}
+
++ (DoricImagePickerMIMEType)getImageMIMETypeFromImageData:(NSData *)imageData {
+    uint8_t firstByte;
+    [imageData getBytes:&firstByte length:1];
+    switch (firstByte) {
+        case kFirstByteJPEG:
+            return DoricImagePickerMIMETypeJPG;
+        case kFirstBytePNG:
+            return DoricImagePickerMIMETypePNG;
+        case kFirstByteGIF:
+            return DoricImagePickerMIMETypeGIF;
+    }
+    return DoricImagePickerMIMETypeOther;
+}
+
++ (NSString *)imageTypeSuffixFromType:(DoricImagePickerMIMEType)type {
+    switch (type) {
+        case DoricImagePickerMIMETypeJPG:
+            return @".jpg";
+        case DoricImagePickerMIMETypePNG:
+            return @".png";
+        case DoricImagePickerMIMETypeGIF:
+            return @".gif";
+        default:
+            return nil;
+    }
+}
+
+
++ (NSDictionary *)getMetaDataFromImageData:(NSData *)imageData {
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef) imageData, NULL);
+    NSDictionary *metadata =
+            (NSDictionary *) CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    CFRelease(source);
+    return metadata;
+}
+
+
++ (NSData *)imageFromImage:(NSData *)imageData withMetaData:(NSDictionary *)metadata {
+    NSMutableData *targetData = [NSMutableData data];
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef) imageData, NULL);
+    if (source == NULL) {
+        return nil;
+    }
+    CGImageDestinationRef destination = NULL;
+    CFStringRef sourceType = CGImageSourceGetType(source);
+    if (sourceType != NULL) {
+        destination =
+                CGImageDestinationCreateWithData((__bridge CFMutableDataRef) targetData, sourceType, 1, nil);
+    }
+    if (destination == NULL) {
+        CFRelease(source);
+        return nil;
+    }
+    CGImageDestinationAddImageFromSource(destination, source, 0, (__bridge CFDictionaryRef) metadata);
+    CGImageDestinationFinalize(destination);
+    CFRelease(source);
+    CFRelease(destination);
+    return targetData;
+}
+
+
++ (NSData *)convertImage:(UIImage *)image
+               usingType:(DoricImagePickerMIMEType)type
+                 quality:(nullable NSNumber *)quality {
+    if (quality && type != DoricImagePickerMIMETypeJPG) {
+        NSLog(@"image_picker: compressing is not supported for type %@. Returning the image with "
+              @"original quality",
+                [self imageTypeSuffixFromType:type]);
+    }
+
+    switch (type) {
+        case DoricImagePickerMIMETypeJPG: {
+            CGFloat qualityFloat = (quality != nil) ? quality.floatValue : 1;
+            return UIImageJPEGRepresentation(image, qualityFloat);
+        }
+        case DoricImagePickerMIMETypePNG:
+            return UIImagePNGRepresentation(image);
+        default: {
+            // converts to JPEG by default.
+            CGFloat qualityFloat = (quality != nil) ? quality.floatValue : 1;
+            return UIImageJPEGRepresentation(image, qualityFloat);
+        }
+    }
+}
+
+
+- (void)pickImageWithUIImagePicker {
+    _imagePickerController = [[UIImagePickerController alloc] init];
+    _imagePickerController.modalPresentationStyle = UIModalPresentationCurrentContext;
+    _imagePickerController.delegate = self;
+    _imagePickerController.mediaTypes = @[(NSString *) kUTTypeImage];
+    self.maxImagesAllowed = 1;
+    BOOL useCamera = [self.params[@"source"] integerValue] == 1;
+    if (useCamera) {
+        [self checkCameraAuthorization];
+    } else {
+        [self checkPhotoAuthorization];
+    }
+}
+
+- (void)checkCameraAuthorization {
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+
+    switch (status) {
+        case AVAuthorizationStatusAuthorized:
+            [self showCamera];
+            break;
+        case AVAuthorizationStatusNotDetermined: {
+            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo
+                                     completionHandler:^(BOOL granted) {
+                                         dispatch_async(dispatch_get_main_queue(), ^{
+                                             if (granted) {
+                                                 [self showCamera];
+                                             } else {
+                                                 [self.promise reject:@"Permission_NOT_GRANTED"];
+                                             }
+                                         });
+                                     }];
+            break;
+        }
+        case AVAuthorizationStatusDenied:
+        case AVAuthorizationStatusRestricted:
+        default:
+            [self.promise reject:@"Permission_NOT_GRANTED"];
+            break;
+    }
+}
+
+- (UIImagePickerControllerCameraDevice)getCameraDeviceFromArguments:(NSDictionary *)arguments {
+    return ([arguments[@"cameraDevice"] isEqualToString:@"front"]) ? UIImagePickerControllerCameraDeviceFront
+            : UIImagePickerControllerCameraDeviceRear;
+}
+
+- (void)showCamera {
+    @synchronized (self) {
+        if (_imagePickerController.beingPresented) {
+            return;
+        }
+    }
+    UIImagePickerControllerCameraDevice device = [self getCameraDeviceFromArguments:self.params];
+    // Camera is not available on simulators
+    if ([UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera] &&
+            [UIImagePickerController isCameraDeviceAvailable:device]) {
+        _imagePickerController.sourceType = UIImagePickerControllerSourceTypeCamera;
+        _imagePickerController.cameraDevice = device;
+        [self.doricContext.vc presentViewController:_imagePickerController
+                                           animated:YES
+                                         completion:nil];
+    } else {
+        [self.promise reject:@"NO_AVAILABLE_CAMERA"];
+    }
+}
+
 - (void)showPhotoLibrary:(DoricImagePickerClassType)imagePickerClassType {
     // No need to check if SourceType is available. It always is.
     switch (imagePickerClassType) {
@@ -190,16 +483,12 @@ static const uint8_t kFirstByteGIF = 0x47;
                                                animated:YES
                                              completion:nil];
             break;
-        case UIImagePickerClassType:
-            UIImagePickerController *imagePickerController = [[UIImagePickerController alloc] init];
-            imagePickerController.modalPresentationStyle = UIModalPresentationCurrentContext;
-            imagePickerController.delegate = self;
-            imagePickerController.mediaTypes = @[(NSString *) kUTTypeImage];
-            imagePickerController.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-            [self.doricContext.vc presentViewController:imagePickerController
+        case UIImagePickerClassType: {
+            [self.doricContext.vc presentViewController:_imagePickerController
                                                animated:YES
                                              completion:nil];
             break;
+        }
     }
 }
 
@@ -246,10 +535,10 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
         PHAsset *originalAsset = [self getAssetFromImagePickerInfo:info];
 
         if (maxWidth || maxHeight) {
-            image = [self scaledImage:image
-                             maxWidth:maxWidth
-                            maxHeight:maxHeight
-                  isMetadataAvailable:YES];
+            image = [DoricImagePickerPlugin scaledImage:image
+                                               maxWidth:maxWidth
+                                              maxHeight:maxHeight
+                                    isMetadataAvailable:YES];
         }
 
         if (!originalAsset) {
@@ -262,18 +551,19 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
                                resultHandler:^(NSData *_Nullable imageData, NSString *_Nullable dataUTI,
                                        UIImageOrientation orientation, NSDictionary *_Nullable info) {
                                    // maxWidth and maxHeight are used only for GIF images.
-                                   [self saveImageWithOriginalImageData:imageData
-                                                                  image:image
-                                                               maxWidth:maxWidth
-                                                              maxHeight:maxHeight
-                                                           imageQuality:desiredImageQuality];
+                                   NSString *path = [DoricImagePickerPlugin saveImageWithOriginalImageData:imageData
+                                                                                                     image:image
+                                                                                                  maxWidth:maxWidth
+                                                                                                 maxHeight:maxHeight
+                                                                                              imageQuality:desiredImageQuality];
+                                   [self.promise resolve:@{@"filePath": path}];
                                }];
         }
     }
 }
 
 
-- (NSString *)saveImageWithOriginalImageData:(NSData *)originalImageData
++ (NSString *)saveImageWithOriginalImageData:(NSData *)originalImageData
                                        image:(UIImage *)image
                                     maxWidth:(NSNumber *)maxWidth
                                    maxHeight:(NSNumber *)maxHeight
@@ -285,7 +575,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
     if (originalImageData) {
         type = [self getImageMIMETypeFromImageData:originalImageData];
         suffix = [self imageTypeSuffixFromType:type] ?: suffix;
-        metaData = [self getMetaDataFromImageData:originalImageData];
+        metaData = [DoricImagePickerPlugin getMetaDataFromImageData:originalImageData];
     }
     if (type == DoricImagePickerMIMETypeGIF) {
         GIFInfo *gifInfo = [self scaledGIFImage:originalImageData
@@ -302,7 +592,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
     }
 }
 
-- (GIFInfo *)scaledGIFImage:(NSData *)data
++ (GIFInfo *)scaledGIFImage:(NSData *)data
                    maxWidth:(NSNumber *)maxWidth
                   maxHeight:(NSNumber *)maxHeight {
     NSMutableDictionary<NSString *, id> *options = [NSMutableDictionary dictionary];
@@ -351,10 +641,24 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
 - (void)saveImageWithPickerInfo:(NSDictionary *)info
                           image:(UIImage *)image
                    imageQuality:(NSNumber *)imageQuality {
-    NSString *savedPath = [FLTImagePickerPhotoAssetUtil saveImageWithPickerInfo:info
-                                                                          image:image
-                                                                   imageQuality:imageQuality];
+
+    NSDictionary *metaData = info[UIImagePickerControllerMediaMetadata];
+    NSString *savedPath = [DoricImagePickerPlugin saveImageWithMetaData:metaData
+                                                                  image:image
+                                                                 suffix:@".jpg"
+                                                                   type:DoricImagePickerMIMETypeJPG
+                                                           imageQuality:imageQuality];
     [self handleSavedPathList:@[savedPath]];
+}
+
+- (void)handleSavedPathList:(NSArray *)pathList {
+    if ((self.maxImagesAllowed == 1)) {
+        [self.promise resolve:@{@"filePath": pathList.firstObject}];
+    } else {
+        [self.promise resolve:[pathList map:^id(NSString *obj) {
+            return @{@"filePath": obj};
+        }]];
+    }
 }
 
 - (PHAsset *)getAssetFromImagePickerInfo:(NSDictionary *)info {
@@ -371,7 +675,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
 }
 
 
-- (UIImage *)scaledImage:(UIImage *)image
++ (UIImage *)scaledImage:(UIImage *)image
                 maxWidth:(NSNumber *)maxWidth
                maxHeight:(NSNumber *)maxHeight
      isMetadataAvailable:(BOOL)isMetadataAvailable {
@@ -466,29 +770,17 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
     return imageQuality;
 }
 
-
-- (NSString *)saveImageWithPickerInfo:(nullable NSDictionary *)info
-                                image:(UIImage *)image
-                         imageQuality:(NSNumber *)imageQuality {
-    NSDictionary *metaData = info[UIImagePickerControllerMediaMetadata];
-    return [self saveImageWithMetaData:metaData
-                                 image:image
-                                suffix:@".jpg"
-                                  type:kFLTImagePickerMIMETypeDefault
-                          imageQuality:imageQuality];
-}
-
-- (NSString *)saveImageWithMetaData:(NSDictionary *)metaData
++ (NSString *)saveImageWithMetaData:(NSDictionary *)metaData
                             gifInfo:(GIFInfo *)gifInfo
                              suffix:(NSString *)suffix {
     NSString *path = [self temporaryFilePath:suffix];
     return [self saveImageWithMetaData:metaData gifInfo:gifInfo path:path];
 }
 
-- (NSString *)saveImageWithMetaData:(NSDictionary *)metaData
++ (NSString *)saveImageWithMetaData:(NSDictionary *)metaData
                               image:(UIImage *)image
                              suffix:(NSString *)suffix
-                               type:(FLTImagePickerMIMEType)type
+                               type:(DoricImagePickerMIMEType)type
                        imageQuality:(NSNumber *)imageQuality {
     NSData *data = [self convertImage:image
                             usingType:type
@@ -508,7 +800,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
                             gifInfo:(GIFInfo *)gifInfo
                                path:(NSString *)path {
     CGImageDestinationRef destination = CGImageDestinationCreateWithURL(
-            (CFURLRef) [NSURL fileURLWithPath:path], kUTTypeGIF, gifInfo.images.count, NULL);
+            (__bridge CFURLRef) [NSURL fileURLWithPath:path], kUTTypeGIF, gifInfo.images.count, NULL);
 
     NSDictionary *frameProperties = @{
             (__bridge NSString *) kCGImagePropertyGIFDictionary: @{
@@ -525,11 +817,11 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
 
     gifProperties[(__bridge NSString *) kCGImagePropertyGIFLoopCount] = @0;
 
-    CGImageDestinationSetProperties(destination, (CFDictionaryRef) gifMetaProperties);
+    CGImageDestinationSetProperties(destination, (__bridge CFDictionaryRef) gifMetaProperties);
 
-    for (NSInteger index = 0; index < gifInfo.images.count; index++) {
-        UIImage *image = (UIImage *) [gifInfo.images objectAtIndex:index];
-        CGImageDestinationAddImage(destination, image.CGImage, (CFDictionaryRef) frameProperties);
+    for (NSUInteger index = 0; index < gifInfo.images.count; index++) {
+        UIImage *image = gifInfo.images[index];
+        CGImageDestinationAddImage(destination, image.CGImage, (__bridge CFDictionaryRef) frameProperties);
     }
 
     CGImageDestinationFinalize(destination);
@@ -538,7 +830,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
     return path;
 }
 
-- (NSString *)temporaryFilePath:(NSString *)suffix {
++ (NSString *)temporaryFilePath:(NSString *)suffix {
     NSString *fileExtension = [@"image_picker_%@" stringByAppendingString:suffix];
     NSString *guid = [[NSProcessInfo processInfo] globallyUniqueString];
     NSString *tmpFile = [NSString stringWithFormat:fileExtension, guid];
@@ -547,7 +839,7 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
     return tmpPath;
 }
 
-- (NSString *)createFile:(NSData *)data suffix:(NSString *)suffix {
++ (NSString *)createFile:(NSData *)data suffix:(NSString *)suffix {
     NSString *tmpPath = [self temporaryFilePath:suffix];
     if ([[NSFileManager defaultManager] createFileAtPath:tmpPath contents:data attributes:nil]) {
         return tmpPath;
@@ -555,5 +847,40 @@ didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey, id> 
         nil;
     }
     return tmpPath;
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14)) {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    dispatch_queue_t backgroundQueue =
+            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0);
+    dispatch_async(backgroundQueue, ^{
+        if (results.count == 0) {
+            [self.promise resolve:nil];
+            return;
+        }
+        NSNumber *maxWidth = self.params[@"maxWidth"];
+        NSNumber *maxHeight = self.params[@"maxHeight"];
+        NSNumber *imageQuality = self.params[@"imageQuality"];
+        NSNumber *desiredImageQuality = [self getDesiredImageQuality:imageQuality];
+        NSOperationQueue *operationQueue = [NSOperationQueue new];
+        NSMutableArray *pathList = [NSMutableArray new];
+
+        for (NSUInteger i = 0; i < results.count; i++) {
+            PHPickerResult *result = results[i];
+            DoricPickerSaveImageToPathOperation *operation =
+                    [[DoricPickerSaveImageToPathOperation alloc] initWithResult:result
+                                                                      maxHeight:maxHeight
+                                                                       maxWidth:maxWidth
+                                                            desiredImageQuality:desiredImageQuality
+                                                                 savedPathBlock:^(NSString *savedPath) {
+                                                                     pathList[i] = savedPath;
+                                                                 }];
+            [operationQueue addOperation:operation];
+        }
+        [operationQueue waitUntilAllOperationsAreFinished];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self handleSavedPathList:pathList];
+        });
+    });
 }
 @end

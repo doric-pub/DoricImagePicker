@@ -119,13 +119,13 @@ public class DoricImagePickerPlugin extends DoricJavaPlugin {
             if (verifyPermissions(grantResults)) {
                 launchTakeImageWithCameraIntent();
             } else {
-                promise.reject(new JavaValue("NO_CAMERA_PERMISSION"));
+                promise.reject(new JavaValue("Permission_NOT_GRANTED"));
             }
         } else if (requestCode == REQUEST_CAMERA_VIDEO_PERMISSION) {
             if (verifyPermissions(grantResults)) {
                 launchTakeVideoWithCameraIntent();
             } else {
-                promise.reject(new JavaValue("NO_CAMERA_PERMISSION"));
+                promise.reject(new JavaValue("Permission_NOT_GRANTED"));
             }
         }
     }
@@ -257,19 +257,6 @@ public class DoricImagePickerPlugin extends DoricJavaPlugin {
                             .toJSONObject()));
         }
     }
-
-    private void handleMultiVideoResult(ArrayList<String> paths) {
-        if (params != null && promise != null) {
-            JSONArray jsonArray = new JSONArray();
-            for (String path : paths) {
-                jsonArray.put(new JSONBuilder()
-                        .put("filePath", path)
-                        .toJSONObject());
-            }
-            promise.resolve(new JavaValue(jsonArray));
-        }
-    }
-
 
     private void handleCancelResult() {
         if (promise != null) {
