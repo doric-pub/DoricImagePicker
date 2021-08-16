@@ -18,9 +18,6 @@ function imagePicker(context) {
         pickMultiImage: (params) => {
             return context.callNative("imagePicker", "pickMultiImage", params);
         },
-        pickMultiVideo: (params) => {
-            return context.callNative("imagePicker", "pickMultiVideo", params);
-        },
     };
 }
 

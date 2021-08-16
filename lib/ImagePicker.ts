@@ -13,6 +13,7 @@ export function imagePicker(context: BridgeContext) {
   return {
     pickImage: (params: {
       source: ImageSource;
+      cameraDevice?: "front" | "back";
       maxWidth?: number;
       maxHeight?: number;
       imageQuality?: number;
@@ -24,13 +25,13 @@ export function imagePicker(context: BridgeContext) {
     pickVideo: (params: {
       source: ImageSource;
       cameraDevice?: "front" | "back";
+      maxDuration?: number;
     }) => {
       return context.callNative("imagePicker", "pickVideo", params) as Promise<
         ImageFile | undefined
       >;
     },
     pickMultiImage: (params: {
-      source: ImageSource;
       maxWidth?: number;
       maxHeight?: number;
       imageQuality?: number;
@@ -38,16 +39,6 @@ export function imagePicker(context: BridgeContext) {
       return context.callNative(
         "imagePicker",
         "pickMultiImage",
-        params
-      ) as Promise<ImageFile[] | undefined>;
-    },
-    pickMultiVideo: (params: {
-      source: ImageSource;
-      cameraDevice?: "front" | "back";
-    }) => {
-      return context.callNative(
-        "imagePicker",
-        "pickMultiVideo",
         params
       ) as Promise<ImageFile[] | undefined>;
     },

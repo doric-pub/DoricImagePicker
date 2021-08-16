@@ -1,13 +1,20 @@
 package pub.doric.library;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.hardware.camera2.CameraCharacteristics;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.webkit.MimeTypeMap;
 
 import com.github.pengfeizhou.jscore.JSONBuilder;
@@ -26,8 +33,12 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 
 import androidx.annotation.Nullable;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import androidx.exifinterface.media.ExifInterface;
 import pub.doric.DoricContext;
 import pub.doric.extension.bridge.DoricMethod;
@@ -41,9 +52,14 @@ public class DoricImagePickerPlugin extends DoricJavaPlugin {
     private static final int REQUEST_CODE_CHOOSE_IMAGE_FROM_GALLERY = 0x201;
     private static final int REQUEST_CODE_CHOOSE_VIDEO_FROM_GALLERY = 0x202;
     private static final int REQUEST_CODE_CHOOSE_MULTI_IMAGE_FROM_GALLERY = 0x203;
-    private static final int REQUEST_CODE_CHOOSE_MULTI_VIDEO_FROM_GALLERY = 0x204;
+    private static final int REQUEST_CAMERA_IMAGE_PERMISSION = 0x205;
+    private static final int REQUEST_CAMERA_VIDEO_PERMISSION = 0x206;
+    private static final int REQUEST_CODE_TAKE_IMAGE_WITH_CAMERA = 0x207;
+    private static final int REQUEST_CODE_TAKE_VIDEO_WITH_CAMERA = 0x208;
+
     private DoricPromise promise;
     private JSObject params;
+    private Uri pendingCameraMediaUri;
 
     public DoricImagePickerPlugin(DoricContext doricContext) {
         super(doricContext);
@@ -51,73 +67,66 @@ public class DoricImagePickerPlugin extends DoricJavaPlugin {
 
     @DoricMethod
     public void pickImage(JSObject params, DoricPromise promise) {
+        this.promise = promise;
+        this.params = params;
         JSValue sourceVal = params.getProperty("source");
         boolean useCamera = sourceVal.isNumber() && sourceVal.asNumber().toInt() == 1;
         if (useCamera) {
-            JSValue cameraVal = params.getProperty("cameraDevice");
-
+            if (!requestCameraImageAccessIfNecessary()) {
+                launchTakeImageWithCameraIntent();
+            }
         } else {
             Intent pickImageIntent = new Intent(Intent.ACTION_GET_CONTENT);
             pickImageIntent.setType("image/*");
             getDoricContext().startActivityForResult(pickImageIntent, REQUEST_CODE_CHOOSE_IMAGE_FROM_GALLERY);
-            this.promise = promise;
-            this.params = params;
         }
     }
 
     @DoricMethod
     public void pickVideo(JSObject params, DoricPromise promise) {
+        this.promise = promise;
+        this.params = params;
         JSValue sourceVal = params.getProperty("source");
         boolean useCamera = sourceVal.isNumber() && sourceVal.asNumber().toInt() == 1;
         if (useCamera) {
-            JSValue cameraVal = params.getProperty("cameraDevice");
-
+            if (!requestCameraVideoAccessIfNecessary()) {
+                launchTakeVideoWithCameraIntent();
+            }
         } else {
             Intent pickImageIntent = new Intent(Intent.ACTION_GET_CONTENT);
             pickImageIntent.setType("video/*");
             getDoricContext().startActivityForResult(pickImageIntent, REQUEST_CODE_CHOOSE_VIDEO_FROM_GALLERY);
-            this.promise = promise;
-            this.params = params;
         }
     }
 
     @DoricMethod
     public void pickMultiImage(JSObject params, DoricPromise promise) {
-        JSValue sourceVal = params.getProperty("source");
-        boolean useCamera = sourceVal.isNumber() && sourceVal.asNumber().toInt() == 1;
-        if (useCamera) {
-            JSValue cameraVal = params.getProperty("cameraDevice");
-
-        } else {
-            Intent pickImageIntent = new Intent(Intent.ACTION_GET_CONTENT);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                pickImageIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            }
-            pickImageIntent.setType("image/*");
-
-            getDoricContext().startActivityForResult(pickImageIntent, REQUEST_CODE_CHOOSE_MULTI_IMAGE_FROM_GALLERY);
-            this.promise = promise;
-            this.params = params;
+        this.promise = promise;
+        this.params = params;
+        Intent pickImageIntent = new Intent(Intent.ACTION_GET_CONTENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            pickImageIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
+        pickImageIntent.setType("image/*");
+
+        getDoricContext().startActivityForResult(pickImageIntent, REQUEST_CODE_CHOOSE_MULTI_IMAGE_FROM_GALLERY);
     }
 
-    @DoricMethod
-    public void pickMultiVideo(JSObject params, DoricPromise promise) {
-        JSValue sourceVal = params.getProperty("source");
-        boolean useCamera = sourceVal.isNumber() && sourceVal.asNumber().toInt() == 1;
-        if (useCamera) {
-            JSValue cameraVal = params.getProperty("cameraDevice");
 
-        } else {
-            Intent pickImageIntent = new Intent(Intent.ACTION_GET_CONTENT);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                pickImageIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQUEST_CAMERA_IMAGE_PERMISSION) {
+            if (verifyPermissions(grantResults)) {
+                launchTakeImageWithCameraIntent();
+            } else {
+                promise.reject(new JavaValue("NO_CAMERA_PERMISSION"));
             }
-            pickImageIntent.setType("video/*");
-
-            getDoricContext().startActivityForResult(pickImageIntent, REQUEST_CODE_CHOOSE_MULTI_VIDEO_FROM_GALLERY);
-            this.promise = promise;
-            this.params = params;
+        } else if (requestCode == REQUEST_CAMERA_VIDEO_PERMISSION) {
+            if (verifyPermissions(grantResults)) {
+                launchTakeVideoWithCameraIntent();
+            } else {
+                promise.reject(new JavaValue("NO_CAMERA_PERMISSION"));
+            }
         }
     }
 
@@ -158,25 +167,52 @@ public class DoricImagePickerPlugin extends DoricJavaPlugin {
                     handleCancelResult();
                 }
                 break;
-            case REQUEST_CODE_CHOOSE_MULTI_VIDEO_FROM_GALLERY:
-                if (resultCode == Activity.RESULT_OK && data != null) {
-                    ArrayList<String> paths = new ArrayList<>();
-                    if (data.getClipData() != null) {
-                        for (int i = 0; i < data.getClipData().getItemCount(); i++) {
-                            paths.add(getPathFromUri(getDoricContext().getContext(), data.getClipData().getItemAt(i).getUri()));
-                        }
-                    } else {
-                        paths.add(getPathFromUri(getDoricContext().getContext(), data.getData()));
-                    }
-                    handleMultiVideoResult(paths);
+            case REQUEST_CODE_TAKE_IMAGE_WITH_CAMERA:
+                if (resultCode == Activity.RESULT_OK) {
+                    MediaScannerConnection.scanFile(
+                            getDoricContext().getContext(),
+                            new String[]{(pendingCameraMediaUri != null) ? pendingCameraMediaUri.getPath() : ""},
+                            null,
+                            new MediaScannerConnection.OnScanCompletedListener() {
+                                @Override
+                                public void onScanCompleted(String path, Uri uri) {
+                                    handleImageResult(path, false);
+                                }
+                            });
                 } else {
-                    // User cancelled choosing a picture.
                     handleCancelResult();
                 }
                 break;
+            case REQUEST_CODE_TAKE_VIDEO_WITH_CAMERA:
+                if (resultCode == Activity.RESULT_OK) {
+                    MediaScannerConnection.scanFile(
+                            getDoricContext().getContext(),
+                            new String[]{(pendingCameraMediaUri != null) ? pendingCameraMediaUri.getPath() : ""},
+                            null,
+                            new MediaScannerConnection.OnScanCompletedListener() {
+                                @Override
+                                public void onScanCompleted(String path, Uri uri) {
+                                    handleVideoResult(path);
+                                }
+                            });
+                } else {
+                    handleCancelResult();
+                }
             default:
                 break;
         }
+    }
+
+    private boolean verifyPermissions(int[] grantResults) {
+        if (grantResults.length < 1) {
+            return false;
+        }
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void handleImageResult(String path, boolean shouldDeleteOriginalIfScaled) {
@@ -460,5 +496,126 @@ public class DoricImagePickerPlugin extends DoricJavaPlugin {
         if (oldExif.getAttribute(property) != null) {
             newExif.setAttribute(property, oldExif.getAttribute(property));
         }
+    }
+
+    private boolean requestCameraImageAccessIfNecessary() {
+        if (getDoricContext().getContext() instanceof Activity) {
+            String[] array = new String[]{Manifest.permission.CAMERA};
+            if (ContextCompat.checkSelfPermission(getDoricContext().getContext(), Manifest.permission.CAMERA)
+                    != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions((Activity) getDoricContext().getContext(), array, REQUEST_CAMERA_IMAGE_PERMISSION);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean requestCameraVideoAccessIfNecessary() {
+        if (getDoricContext().getContext() instanceof Activity) {
+            String[] array = new String[]{Manifest.permission.CAMERA};
+            if (ContextCompat.checkSelfPermission(getDoricContext().getContext(), Manifest.permission.CAMERA)
+                    != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions((Activity) getDoricContext().getContext(), array, REQUEST_CAMERA_VIDEO_PERMISSION);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void useFrontCamera(Intent intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            intent.putExtra(
+                    "android.intent.extras.CAMERA_FACING", CameraCharacteristics.LENS_FACING_FRONT);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                intent.putExtra("android.intent.extra.USE_FRONT_CAMERA", true);
+            }
+        } else {
+            intent.putExtra("android.intent.extras.CAMERA_FACING", 1);
+        }
+    }
+
+    private File createTemporaryWritableImageFile() {
+        return createTemporaryWritableFile(".jpg");
+    }
+
+    private File createTemporaryWritableVideoFile() {
+        return createTemporaryWritableFile(".mp4");
+    }
+
+    private File createTemporaryWritableFile(String suffix) {
+        String filename = UUID.randomUUID().toString();
+        File image;
+        final File externalFilesDirectory =
+                getDoricContext().getContext().getExternalFilesDir(Environment.DIRECTORY_PICTURES);
+        try {
+            image = File.createTempFile(filename, suffix, externalFilesDirectory);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return image;
+    }
+
+    private void launchTakeImageWithCameraIntent() {
+        Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        JSValue cameraVal = params.getProperty("cameraDevice");
+        boolean useFront = cameraVal.isString() && cameraVal.asString().value().equals("front");
+        if (useFront) {
+            useFrontCamera(intent);
+        }
+        boolean canTakePhotos = intent.resolveActivity(getDoricContext().getContext().getPackageManager()) != null;
+
+        if (!canTakePhotos) {
+            promise.reject(new JavaValue("NO_AVAILABLE_CAMERA"));
+            return;
+        }
+
+        File imageFile = createTemporaryWritableImageFile();
+        pendingCameraMediaUri = Uri.parse("file:" + imageFile.getAbsolutePath());
+        String fileProviderName = getDoricContext().getContext().getPackageName() + ".doric.image_provider";
+        Uri imageUri = FileProvider.getUriForFile(getDoricContext().getContext(), fileProviderName, imageFile);
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, imageUri);
+        grantUriPermissions(intent, imageUri);
+        getDoricContext().startActivityForResult(intent, REQUEST_CODE_TAKE_IMAGE_WITH_CAMERA);
+    }
+
+    private void grantUriPermissions(Intent intent, Uri imageUri) {
+        PackageManager packageManager = getDoricContext().getContext().getPackageManager();
+        List<ResolveInfo> compatibleActivities =
+                packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
+
+        for (ResolveInfo info : compatibleActivities) {
+            getDoricContext().getContext().grantUriPermission(
+                    info.activityInfo.packageName,
+                    imageUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        }
+    }
+
+    private void launchTakeVideoWithCameraIntent() {
+        Intent intent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+        if (params.getProperty("maxDuration").isNumber()) {
+            int maxSeconds = params.getProperty("maxDuration").asNumber().toInt();
+            intent.putExtra(MediaStore.EXTRA_DURATION_LIMIT, maxSeconds);
+        }
+        JSValue cameraVal = params.getProperty("cameraDevice");
+        boolean useFront = cameraVal.isString() && cameraVal.asString().value().equals("front");
+        if (useFront) {
+            useFrontCamera(intent);
+        }
+
+        boolean canTakePhotos = intent.resolveActivity(getDoricContext().getContext().getPackageManager()) != null;
+
+        if (!canTakePhotos) {
+            promise.reject(new JavaValue("NO_AVAILABLE_CAMERA"));
+            return;
+        }
+
+        File videoFile = createTemporaryWritableVideoFile();
+        pendingCameraMediaUri = Uri.parse("file:" + videoFile.getAbsolutePath());
+        String fileProviderName = getDoricContext().getContext().getPackageName() + ".doric.image_provider";
+        Uri videoUri = FileProvider.getUriForFile(getDoricContext().getContext(), fileProviderName, videoFile);
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, videoUri);
+        grantUriPermissions(intent, videoUri);
+        getDoricContext().startActivityForResult(intent, REQUEST_CODE_TAKE_VIDEO_WITH_CAMERA);
     }
 }

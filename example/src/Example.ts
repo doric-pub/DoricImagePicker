@@ -28,9 +28,10 @@ class Example extends Panel {
         textColor: Color.WHITE,
         onClick: async () => {
           const result = await imagePicker(this.context).pickImage({
-            source: ImageSource.Gallery,
+            source: ImageSource.Camera,
           });
           if (result) {
+            previewView.imageFilePath = result.filePath;
             await modal(this.context).alert(JSON.stringify(result));
           } else {
             await modal(this.context).alert("User canceled.");
@@ -46,9 +47,10 @@ class Example extends Panel {
         textColor: Color.WHITE,
         onClick: async () => {
           const result = await imagePicker(this.context).pickVideo({
-            source: ImageSource.Gallery,
+            source: ImageSource.Camera,
           });
           if (result) {
+            previewView.imageFilePath = result.filePath;
             await modal(this.context).alert(JSON.stringify(result));
           } else {
             await modal(this.context).alert("User canceled.");
@@ -63,27 +65,7 @@ class Example extends Panel {
         backgroundColor: Color.parse("#70a1ff"),
         textColor: Color.WHITE,
         onClick: async () => {
-          const result = await imagePicker(this.context).pickMultiImage({
-            source: ImageSource.Gallery,
-          });
-          if (result) {
-            await modal(this.context).alert(JSON.stringify(result));
-          } else {
-            await modal(this.context).alert("User canceled.");
-          }
-        },
-        layoutConfig: layoutConfig().fit(),
-        padding: { left: 20, right: 20, top: 20, bottom: 20 },
-      }),
-      text({
-        text: "Pick multi video",
-        textSize: 20,
-        backgroundColor: Color.parse("#70a1ff"),
-        textColor: Color.WHITE,
-        onClick: async () => {
-          const result = await imagePicker(this.context).pickMultiVideo({
-            source: ImageSource.Gallery,
-          });
+          const result = await imagePicker(this.context).pickMultiImage({});
           if (result) {
             await modal(this.context).alert(JSON.stringify(result));
           } else {
