@@ -3,6 +3,17 @@
 #import <Photos/Photos.h>
 #import <PhotosUI/PhotosUI.h>
 
+typedef NS_ENUM(NSInteger, DoricImagePickerClassType) {
+    UIImagePickerClassType, PHPickerClassType
+};
+
+typedef NS_ENUM(NSInteger, DoricImagePickerMIMEType) {
+    DoricImagePickerMIMETypeJPG,
+    DoricImagePickerMIMETypePNG,
+    DoricImagePickerMIMETypeGIF,
+    DoricImagePickerMIMETypeOther
+};
+
 @interface DoricPickerSaveImageToPathOperation : NSOperation
 @property(strong, nonatomic) PHPickerResult *result;
 @property(assign, nonatomic) NSNumber *maxHeight;
@@ -59,17 +70,6 @@ typedef void (^GetSavedPath)(NSString *);
 + (NSString *)saveImageWithOriginalImageData:(NSData *)originalImageData image:(UIImage *)image maxWidth:(NSNumber *)maxWidth maxHeight:(NSNumber *)maxHeight imageQuality:(NSNumber *)imageQuality;
 
 @end
-
-typedef NS_ENUM(NSInteger, DoricImagePickerClassType) {
-    UIImagePickerClassType, PHPickerClassType
-};
-
-typedef NS_ENUM(NSInteger, DoricImagePickerMIMEType) {
-    DoricImagePickerMIMETypeJPG,
-    DoricImagePickerMIMETypePNG,
-    DoricImagePickerMIMETypeGIF,
-    DoricImagePickerMIMETypeOther
-};
 
 static const uint8_t kFirstByteJPEG = 0xFF;
 static const uint8_t kFirstBytePNG = 0x89;
@@ -204,51 +204,57 @@ static const uint8_t kFirstByteGIF = 0x47;
 - (void)pickImage:(NSDictionary *)dic withPromise:(DoricPromise *)promise {
     self.params = dic;
     self.promise = promise;
-    BOOL useCamera = [dic[@"source"] integerValue] == 1;
-    if (useCamera) {
-        [self pickImageWithUIImagePicker];
-    } else {
-        if (@available(iOS 14, *)) {
-            // PHPicker is used
-            [self pickImageWithPHPicker:1];
-        } else {
-            // UIImagePicker is used
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BOOL useCamera = [dic[@"source"] integerValue] == 1;
+        if (useCamera) {
             [self pickImageWithUIImagePicker];
+        } else {
+            if (@available(iOS 14, *)) {
+                // PHPicker is used
+                [self pickImageWithPHPicker:1];
+            } else {
+                // UIImagePicker is used
+                [self pickImageWithUIImagePicker];
+            }
         }
-    }
+    });
 }
 
 - (void)pickMultiImage:(NSDictionary *)dic withPromise:(DoricPromise *)promise {
     self.params = dic;
     self.promise = promise;
-    if (@available(iOS 14, *)) {
-        [self pickImageWithPHPicker:0];
-    } else {
-        [self pickImageWithUIImagePicker];
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (@available(iOS 14, *)) {
+            [self pickImageWithPHPicker:0];
+        } else {
+            [self pickImageWithUIImagePicker];
+        }
+    });
 }
 
 - (void)pickVideo:(NSDictionary *)dic withPromise:(DoricPromise *)promise {
     self.params = dic;
     self.promise = promise;
-    _imagePickerController = [[UIImagePickerController alloc] init];
-    _imagePickerController.modalPresentationStyle = UIModalPresentationCurrentContext;
-    _imagePickerController.delegate = self;
-    _imagePickerController.mediaTypes = @[
-            (NSString *) kUTTypeMovie, (NSString *) kUTTypeAVIMovie, (NSString *) kUTTypeVideo,
-            (NSString *) kUTTypeMPEG4
-    ];
-    _imagePickerController.videoQuality = UIImagePickerControllerQualityTypeHigh;
-    if ([dic[@"maxDuration"] isKindOfClass:[NSNumber class]]) {
-        NSTimeInterval max = [dic[@"maxDuration"] doubleValue];
-        _imagePickerController.videoMaximumDuration = max;
-    }
-    BOOL useCamera = [dic[@"source"] integerValue] == 1;
-    if (useCamera) {
-        [self checkCameraAuthorization];
-    } else {
-        [self checkPhotoAuthorization];
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        _imagePickerController = [[UIImagePickerController alloc] init];
+        _imagePickerController.modalPresentationStyle = UIModalPresentationCurrentContext;
+        _imagePickerController.delegate = self;
+        _imagePickerController.mediaTypes = @[
+                (NSString *) kUTTypeMovie, (NSString *) kUTTypeAVIMovie, (NSString *) kUTTypeVideo,
+                (NSString *) kUTTypeMPEG4
+        ];
+        _imagePickerController.videoQuality = UIImagePickerControllerQualityTypeHigh;
+        if ([dic[@"maxDuration"] isKindOfClass:[NSNumber class]]) {
+            NSTimeInterval max = [dic[@"maxDuration"] doubleValue];
+            _imagePickerController.videoMaximumDuration = max;
+        }
+        BOOL useCamera = [dic[@"source"] integerValue] == 1;
+        if (useCamera) {
+            [self checkCameraAuthorization];
+        } else {
+            [self checkPhotoAuthorization];
+        }
+    });
 }
 
 - (void)checkPhotoAuthorization {
